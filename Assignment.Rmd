@@ -1,0 +1,168 @@
+---
+title: "Machine Learning Assignment"
+author: "William Cone"
+date: "27 December 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(caret)
+```
+
+## Introduction
+
+The purpose of this assignment is to build a machine learning model that predicts the quality of the performance of a weight lifting exercise (5 categories A - E) given information from movement tracking devices.
+
+Three results are required from the model:
+
+* a description how the model is built and validated, with reasons
+* an estimate of the out of sample error rate
+* a prediction of 20 cases in a test set
+
+The data comes from the following original study:
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises.
+Read more: <http://groupware.les.inf.puc-rio.br/har#ixzz51Phbe8Lw>
+
+
+## Exploratory Data Analysis and Features
+
+The original training and testing data are read in. 
+
+The available predictors in the test set need to be considered otherwise the model which is produced won't be able to be used. This does not cause a risk of over-fitting as no training will occur using the original testing data.
+
+During the exploratory analysis the following was found:
+
+* The testing set has 160 variables of which 100 contain only NA values. These 100 variables cannot be used as predictors.
+* Of the remaining 60 variables, eight are excluded from the list of potential predictors - counters, time-stamps and user names which are not movement tracking measurements.
+* In the original training and testing data there is a full set of data for all the remaining 52 variables (non NA).
+* The data in these potential predictors is numeric.
+* In the training data there are 858 windows of observations with on average 23 data points each.
+* In the testing data there is only one data point for each window.
+* The selected features for modelling are the average by window of each of the potential predictors. 
+
+
+```{r exploratory data analysis and features}
+
+
+original.training <- read.csv("pml-training.csv",stringsAsFactors = FALSE,header = TRUE)
+
+original.testing <- read.csv("pml-testing.csv",stringsAsFactors = FALSE,header = TRUE)
+
+testing.notna.cols<-sapply(1:160,function(x){sum(is.na(original.testing[,x])) < 20})
+
+testing.not.na.names <- colnames(original.testing)[testing.notna.cols]
+
+predictors <- testing.not.na.names[!(testing.not.na.names %in% 
+                      c("X","user_name","raw_timestamp_part_1", "raw_timestamp_part_2","cvtd_timestamp","new_window","num_window","problem_id"))]
+
+
+transformed.data <- aggregate(. ~ num_window, original.training[,c("num_window",predictors)],mean)
+
+output.only <- aggregate(classe ~ num_window, original.training, min)
+
+transformed.data <- merge(transformed.data,output.only,by = "num_window")
+
+
+```
+
+## Pre-processing
+
+The original training data will be split three ways into:
+
+- a training set of 60%
+- a testing set of 20% required to select between alternative trained models
+- a cross validation set of 20% to estimate the out of sample error rate
+
+The testing set of 20 cases which has been provided cannot be used for any of these purposes as the output is not provided.
+
+Principle Component Analysis at the 95% variability level will be tested as a pre-processing option, given that:
+
+- 52 numerical variables is a lot of information to predict an output with 5 states
+- several of the predictors are highly correlated
+- to attempt to reduce the risk of over-fitting
+
+Figure 1: 10 most highly correlated predictors in training set
+
+
+```{r preprocessing}
+
+set.seed(56745)
+
+inTraining <- createDataPartition(transformed.data$classe,p = 0.6, list = FALSE)
+training <- transformed.data[inTraining,]
+not.training <- transformed.data[-inTraining,]
+
+inTesting <- createDataPartition(not.training$classe,p=0.5, list = FALSE)
+testing <- not.training[inTesting,]
+cross.validation <- not.training[-inTesting,]
+
+correlations <- cor(training[,predictors])
+correlations[lower.tri(correlations)] <- 0
+correlations <- abs(correlations) - diag(length(predictors))
+
+highest.pos <- arrayInd(order(correlations,decreasing = TRUE)[1:10],dim(correlations))
+
+highest.df <- data.frame(predictor1 = rownames(correlations)[highest.pos[,1]], predictor2 = colnames(correlations)[highest.pos[,2]], correlation = correlations[highest.pos])
+
+print(highest.df)
+```
+
+## Algorithm selection
+
+The regression tree or random forest algorithms can predict category outcomes. Random forest produces models which are less easy to interpret and explain than regression trees, but are still suitable for this assignment as the requirement is to accurately predict the 20 original test cases rather than an explanation of the effects. 
+
+Both regression trees and random forests will be trained, with and without PCA pre-processing and the model with the highest accuracy on the testing set selected.
+
+```{r training and testing}
+
+suppressPackageStartupMessages(suppressWarnings(m1 <- train(classe ~ ., data = training[,-1], method = "rf")))
+p1 <- predict(m1,newdata = testing)
+cm1 <- confusionMatrix(p1,testing$classe)
+
+suppressWarnings(m2 <- train(classe ~ ., data = training[,-1], method = "rf",preProcess = "pca", trControl = trainControl(preProcOptions = list(thresh = 0.95))))
+p2 <- predict(m2,newdata = testing)
+cm2 <- confusionMatrix(p2,testing$classe)
+
+suppressWarnings(m3 <- train(classe ~ ., data = training[,-1], method = "rpart"))
+p3 <- predict(m3,newdata = testing)
+cm3 <- confusionMatrix(p3,testing$classe)
+
+suppressWarnings(m4 <- train(classe ~ ., data = training[,-1], method = "rpart",preProcess = "pca", trControl = trainControl(preProcOptions = list(thresh = 0.95))))
+p4 <- predict(m4,newdata = testing)
+cm4 <- confusionMatrix(p4,testing$classe)
+
+```
+
+The models are trained, and the following accuracy is observed on the 20% testing set:
+
+- Trained Model 1: Random forest, accuracy 88%
+- Trained Model 2: Random forest with PCA, accuracy 77%
+- Trained Model 3: Regression tree, accuracy 53%
+- Trained Model 4: Regression tree with PCA, accuracy 35%
+
+Model 1 above is selected as the final model. Despite the correlations between the predictor variables, PCA pre-processing reduces the accuracy of the predictions.
+
+Figure 2: Confusion matrix on the testing set with the final model:
+
+```{r out of sample error}
+
+cm1$table
+cm1$overall[1]
+
+pred <- predict(m1,newdata = cross.validation)
+cm.final <- confusionMatrix(pred,cross.validation$classe)
+
+```
+
+# Estimated out of sample error
+
+The estimated out of sample accuracy is determined on the cross-validation set, and is 88%, with a 95% confidence interval of 82% to 93%.
+
+Figure 3: Confusion matrix on the cross-validation set with the final model:
+
+```{r figure 3}
+
+cm.final
+
+```
